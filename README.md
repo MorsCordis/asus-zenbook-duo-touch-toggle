@@ -43,3 +43,6 @@ Currently, touching the script using a GNOME Custom Shortcut is the easiest way 
 
 ## Logging
 Toast Notifications will indicate current state ("Lower Touchscreen DISABLED" and "Lower Touchscreen ENABLED"). If an error arises, a localized `notify-send` error pop-up will trigger. Background lock state is maintained dynamically via `/tmp/duo_touch_grabber.pid`.
+
+## Acknowledgements
+This project was developed with the assistance of Google Gemini.
