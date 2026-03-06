@@ -14,7 +14,7 @@ if [ ! -f "$SCRIPT_PATH" ]; then
     exit 1
 fi
 
-echo "Setting execution permissions for $SCRIPT_NAME..."
+echo "Setting execution permissions..."
 chmod +x "$SCRIPT_PATH"
 
 echo "Configuring passwordless execution for GNOME shortcuts..."
@@ -23,7 +23,6 @@ echo "This requires sudo privileges to create a file in /etc/sudoers.d/"
 SUDOERS_FILE="/etc/sudoers.d/touch-toggle"
 RULE="$USER ALL=(root) NOPASSWD: $SCRIPT_PATH"
 
-# Write securely to the sudoers directory
 echo "$RULE" | sudo tee "$SUDOERS_FILE" > /dev/null
 sudo chmod 0440 "$SUDOERS_FILE"
 
@@ -31,3 +30,6 @@ echo ""
 echo "Installation Success! 🎉"
 echo "You can now bind a GNOME Custom Shortcut to:"
 echo "sudo \"$SCRIPT_PATH\""
+echo ""
+echo "To also install the Auto-Wallpaper Switcher, run:"
+echo "  bash \"$SCRIPT_DIR/install-wallpaper.sh\""
