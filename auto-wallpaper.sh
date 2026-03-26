@@ -1,25 +1,16 @@
 #!/bin/bash
 # Auto-Wallpaper Switcher for Zenbook Duo (2025)
-# Hooks into zenbook-duo-linux's duo.sh via:
-#   /tmp/duo/status  — inotifywait watches this for keyboard attach/detach
-#   /tmp/duo/duo.log — single awk process watches for rotation events
+# Watches the Rust daemon's state.json for keyboard and orientation changes,
+# then applies the appropriate wallpaper mode.
 #
-# Image processing runs in a background subshell with a flock() so
-# events never block the watchers, and concurrent switches can't pile up.
+# Compatible with zenbook-duo-linux Rust daemon (v2+).
+# State source: /var/lib/zenbook-duo/state.json
 
 WALLPAPER_DIR="${HOME}/Pictures/ZenbookWallpapers"
-LOG_FILE="/tmp/duo/duo.log"
-STATUS_FILE="/tmp/duo/status"
+STATE_FILE="/var/lib/zenbook-duo/state.json"
 CONFIG_FILE="${HOME}/.config/zenbook-wallpaper/config"
-# Each mode uses its own output file so the URI genuinely changes between
-# mode switches — GNOME's background compositor caches by URI, not by file
-# content, so sharing one path means it never refreshes the rendered layer.
-IMG_LAPTOP="/tmp/zenbook_wallpaper_laptop.jpg"
-IMG_DUAL="/tmp/zenbook_wallpaper_dual.jpg"
-IMG_DESKTOP="/tmp/zenbook_wallpaper_desktop.jpg"
-IMG_SHARING="/tmp/zenbook_wallpaper_sharing.jpg"
-MODE_FILE="/tmp/zenbook_wallpaper_mode"    # persists last mode (debounce)
-LOCK_FILE="/tmp/zenbook_wallpaper_lock"   # prevents concurrent magick runs
+MODE_FILE="/tmp/zenbook_wallpaper_mode"
+LOCK_FILE="/tmp/zenbook_wallpaper_lock"
 
 # --- Defaults (overridable via config) ---
 ENABLED=true
@@ -64,16 +55,11 @@ pick_image() {
 
 apply_wallpaper() {
     local opts="$1"
-    local uri="$2"   # must be a unique path each call — GNOME caches by URI
+    local uri="$2"
     echo "$(date) - WALLPAPER - opts=$opts uri=file://$uri"
     gsettings set org.gnome.desktop.background picture-options  "$opts"
     gsettings set org.gnome.desktop.background picture-uri      "file://$uri"
     gsettings set org.gnome.desktop.background picture-uri-dark "file://$uri"
-    # Explicitly tell GNOME Shell to rebuild its background actors.
-    # When a monitor is removed (dual→single), Mutter keeps the old background
-    # actor rather than recreating it, so gsettings changes don't reach it.
-    # _updateBackgrounds() tears down and recreates all actors with current settings.
-    # Shell.Eval requires unsafe-mode in GNOME 44+ so the || true swallows failures.
     gdbus call --session \
         --dest org.gnome.Shell \
         --object-path /org/gnome/Shell \
@@ -84,7 +70,7 @@ apply_wallpaper() {
 }
 
 # ============================================================
-# Core switch — runs in a background subshell with flock()
+# Core switch -- runs in a background subshell with flock()
 # so watchers never block, and concurrent calls don't pile up.
 # ============================================================
 
@@ -101,10 +87,9 @@ switch_wallpaper() {
     echo "$mode" > "$MODE_FILE"
     echo "$(date) - SWITCH - mode=$mode (was: ${last:-none})"
 
-    # Run image processing in background; flock prevents pile-ups
     (
         exec 9>"$LOCK_FILE"
-        flock 9   # blocks only if another switch is actively running
+        flock 9
 
         load_config
         local wp_dir="${WALLPAPER_DIR}/${mode}"
@@ -120,11 +105,6 @@ switch_wallpaper() {
                     find /tmp -maxdepth 1 -name 'zenbook_wallpaper_laptop_*.jpg' \
                         ! -name "$(basename "$out")" -delete 2>/dev/null
                     apply_wallpaper "zoom" "$out"
-                    # GNOME background actors are not rebuilt by gsettings changes alone
-                    # after a monitors-changed event (dual→single transition).
-                    # Re-applying the same single-monitor gdctl config fires
-                    # monitors-changed again, which forces GNOME Shell to recreate
-                    # background actors from the current gsettings (our new wallpaper).
                     local scale
                     scale=$(gdctl show 2>/dev/null | awk '/Scale:/{print $2; exit}')
                     [ -z "$scale" ] && scale=1.66
@@ -188,83 +168,69 @@ switch_wallpaper() {
 }
 
 # ============================================================
+# State reader -- derives wallpaper mode from daemon state
+# ============================================================
+
+read_mode_from_state() {
+    local attached orientation
+    attached=$(jq -r '.status.keyboardAttached' "$STATE_FILE" 2>/dev/null)
+    orientation=$(jq -r '.status.orientation' "$STATE_FILE" 2>/dev/null)
+
+    if [ "$attached" = "true" ]; then
+        echo "Laptop"
+    else
+        case "$orientation" in
+            left|right)   echo "Desktop" ;;
+            inverted)     echo "Sharing" ;;
+            *)            echo "Dual" ;;
+        esac
+    fi
+}
+
+# ============================================================
 # Initial state
 # ============================================================
 
 echo "$(date) - Starting Zenbook Duo Auto-Wallpaper Switcher"
+echo "$(date) - Watching $STATE_FILE (Rust daemon)"
 
-# Clean up all stale wallpaper files from any previous run
+# Clean up stale wallpaper files from any previous run
 rm -f "$MODE_FILE"
 find /tmp -maxdepth 1 -name 'zenbook_wallpaper_*.jpg' -delete 2>/dev/null
 echo "$(date) - Cleaned up stale wallpaper files"
 
-# Wait up to 15s for duo.sh to create the status file
+# Wait up to 30s for the daemon to create state.json
 wait_count=0
-while [ ! -f "$STATUS_FILE" ] && [ "$wait_count" -lt 15 ]; do
-    echo "$(date) - Waiting for $STATUS_FILE..."
+while [ ! -f "$STATE_FILE" ] && [ "$wait_count" -lt 30 ]; do
+    echo "$(date) - Waiting for $STATE_FILE..."
     sleep 1
     wait_count=$((wait_count + 1))
 done
 
-if [ -f "$STATUS_FILE" ]; then
-    # shellcheck disable=SC1090
-    source "$STATUS_FILE"
-    if [ "$KEYBOARD_ATTACHED" = "true" ]; then
-        switch_wallpaper "Laptop"
-    else
-        switch_wallpaper "Dual"
-    fi
+if [ -f "$STATE_FILE" ]; then
+    mode=$(read_mode_from_state)
+    echo "$(date) - Initial state: mode=$mode"
+    switch_wallpaper "$mode"
 else
-    echo "$(date) - $STATUS_FILE not found after 15s; defaulting to Dual"
+    echo "$(date) - $STATE_FILE not found after 30s; defaulting to Dual"
     switch_wallpaper "Dual"
 fi
 
 # ============================================================
-# Single log watcher — all events come from duo.log
-# ============================================================
-# Key insight: "MONITOR - Disabled/Enabled bottom display" is logged by
-# duo.sh AFTER duo-display-set-single/dual-below fully completes and
-# duo-set-status is written. That means Mutter's monitor reconfiguration
-# is done before we ever apply a new wallpaper — no more race conditions.
-#
-# By contrast, watching /tmp/duo/status fires BEFORE the display change,
-# causing GNOME's background actor recreate (triggered by monitor changes)
-# to overwrite our wallpaper setting.
-
-watch_log() {
-    echo "$(date) - Watching $LOG_FILE for display and rotation events"
-    tail -n 0 -F "$LOG_FILE" 2>/dev/null \
-    | awk '
-        /MONITOR - Disabled bottom display/ { print "Laptop";         fflush() }
-        /MONITOR - Enabled bottom display/  { print "Dual";           fflush() }
-        /ROTATE - Left-up/                  { print "Desktop:check";  fflush() }
-        /ROTATE - Right-up/                 { print "Desktop:check";  fflush() }
-        /ROTATE - Bottom-up/                { print "Sharing:check";  fflush() }
-        /ROTATE - Normal/                   { print "Dual:check";     fflush() }
-    ' \
-    | while read -r event; do
-        local mode="${event%%:*}"
-        local check="${event##*:}"
-
-        # Rotation events only fire when keyboard is detached; verify before acting.
-        if [ "$check" = "check" ]; then
-            # shellcheck disable=SC1090
-            source "$STATUS_FILE" 2>/dev/null
-            if [ "$KEYBOARD_ATTACHED" != "false" ]; then
-                continue
-            fi
-        fi
-
-        # Brief pause to let duo.sh finish its gdctl call before we kick off ours.
-        sleep 0.8
-        switch_wallpaper "$mode"
-    done
-}
-
-# ============================================================
-# Run watcher, wait for background jobs
+# Watch state.json for changes via inotifywait
 # ============================================================
 
-watch_log &
+echo "$(date) - Watching $STATE_FILE for state changes"
 
-wait
+inotifywait -m -e modify -e moved_to --format '%w%f' \
+    "$(dirname "$STATE_FILE")" 2>/dev/null \
+| while read -r changed_file; do
+    # Only react to state.json changes (ignore daemon.log, etc.)
+    [ "$(basename "$changed_file")" = "state.json" ] || continue
+
+    # Brief pause to let the daemon finish writing
+    sleep 0.5
+
+    mode=$(read_mode_from_state)
+    switch_wallpaper "$mode"
+done

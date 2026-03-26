@@ -1,7 +1,7 @@
 [Unit]
 Description=Zenbook Duo Auto-Wallpaper Switcher
-After=graphical-session.target zenbook-duo-user.service
-Wants=graphical-session.target zenbook-duo-user.service
+After=graphical-session.target zenbook-duo-session-agent.service
+Wants=graphical-session.target zenbook-duo-session-agent.service
 
 [Service]
 Type=simple
