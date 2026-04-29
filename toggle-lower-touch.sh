@@ -58,6 +58,30 @@ if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_UID/bus"
 fi
 
+STYLUS_BRIGHTNESS_PERCENT=20
+INTEL_BACKLIGHT="/sys/class/backlight/intel_backlight"
+EDP2_BACKLIGHT="/sys/class/backlight/card0-eDP-2-backlight"
+SCREENPAD_BACKLIGHT="/sys/class/backlight/asus_screenpad"
+
+set_bottom_brightness_percent() {
+    local pct="$1"
+    if [ -d "$EDP2_BACKLIGHT" ]; then
+        local m=$(cat "$EDP2_BACKLIGHT/max_brightness")
+        echo $(( pct * m / 100 )) > "$EDP2_BACKLIGHT/brightness"
+    fi
+    if [ -d "$SCREENPAD_BACKLIGHT" ]; then
+        local m=$(cat "$SCREENPAD_BACKLIGHT/max_brightness")
+        echo $(( pct * m / 100 )) > "$SCREENPAD_BACKLIGHT/brightness"
+    fi
+}
+
+match_bottom_to_top() {
+    [ -d "$INTEL_BACKLIGHT" ] || return
+    local raw=$(cat "$INTEL_BACKLIGHT/brightness")
+    local m=$(cat "$INTEL_BACKLIGHT/max_brightness")
+    set_bottom_brightness_percent "$(( raw * 100 / m ))"
+}
+
 # Check if the grabber is currently running via the PID file
 PID_FILE="/tmp/duo_touch_grabber.pid"
 
@@ -68,6 +92,7 @@ if [ -f "$PID_FILE" ]; then
         # It's running, so touch is disabled. Let's enable it by killing the grabber.
         sudo kill "$GRABBER_PID"
         sudo rm -f "$PID_FILE"
+        match_bottom_to_top
         sudo -u "$USER_NAME" DISPLAY="$DISPLAY" DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" notify-send "Zenbook Duo" "Lower Touchscreen ENABLED" -i "input-touchscreen" -t 2000
         exit 0
     else
@@ -99,6 +124,8 @@ fi
 # We spawn it with nohup so it detaches beautifully and holds the locks
 sudo nohup "$GRABBER_BIN" $EVENT_NODES >/dev/null 2>&1 &
 disown
+
+set_bottom_brightness_percent "$STYLUS_BRIGHTNESS_PERCENT"
 
 # Send notification
 sudo -u "$USER_NAME" DISPLAY="$DISPLAY" DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" notify-send "Zenbook Duo" "Lower Touchscreen DISABLED (Stylus active)" -i "input-tablet" -t 2000
